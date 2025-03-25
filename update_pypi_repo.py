@@ -1,75 +1,94 @@
 import os
 import shutil
 import sys
-import zipfile
-from pathlib import Path
-from packaging.utils import canonicalize_name
-from packaging.version import parse
+import hashlib
+import argparse
+from urllib.parse import quote
 
-# Define repo root folder
-REPO_ROOT = Path(__file__).parent
 
-def extract_metadata(whl_path):
-    """Extracts package name and version from a .whl filename."""
-    whl_name = Path(whl_path).stem  # Remove .whl extension
-    parts = whl_name.split('-')  # whl filename format: pkgname-version-python-arch.whl
+def calculate_sha256(file_path):
+    """Calculate the SHA-256 hash of a file."""
+    sha256 = hashlib.sha256()
+    with open(file_path, 'rb') as f:
+        while chunk := f.read(8192):
+            sha256.update(chunk)
+    return sha256.hexdigest()
 
+
+def update_root_index(pkg_name, root_dir):
+    """Update the root index.html file with a link to the package."""
+    index_file = os.path.join(root_dir, "index.html")
+    link_entry = f'<a href="{pkg_name}" rel="internal">{pkg_name}</a>'
+
+    if os.path.exists(index_file):
+        with open(index_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        if link_entry not in content:
+            content = content.replace("</body>", f"{link_entry}\n</body>")
+    else:
+        content = f'<!DOCTYPE html>\n<html><head><title>Simple Index</title><meta name="api-version" value="2" /></head><body>\n{link_entry}\n</body></html>'
+
+    with open(index_file, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def update_package_index(pkg_name, version, whl_file, root_dir, base_url):
+    """Update the index.html file in the package directory with the new .whl file."""
+    package_dir = os.path.join(root_dir, pkg_name)
+    index_file = os.path.join(package_dir, "index.html")
+    sha256_hash = calculate_sha256(whl_file)
+    whl_filename = os.path.basename(whl_file)
+    whl_url = f"{base_url}/{pkg_name}/{version}/{quote(whl_filename)}#sha256={sha256_hash}"
+    link_entry = f'        <a href="{whl_url}" data-requires-python="&gt;=3.8, &lt;3.13" rel="internal">{whl_filename}</a>'
+
+    if os.path.exists(index_file):
+        with open(index_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        if link_entry not in content:
+            content = content.replace("</body>", f"{link_entry}\n    </body>")
+    else:
+        content = f'<!DOCTYPE html>\n<html>\n    <head>\n        <title>Simple Index</title>\n        <meta name="api-version" value="2"/>\n    </head>\n    <body>\n{link_entry}\n    </body>\n</html>'
+
+    with open(index_file, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def process_whl_file(whl_file, root_dir, base_url):
+    """Process a .whl file and update the directory structure and index.html files."""
+    if not os.path.exists(whl_file):
+        print(f"Error: File {whl_file} does not exist.")
+        return
+
+    whl_filename = os.path.basename(whl_file)
+    parts = whl_filename.split("-")
     if len(parts) < 2:
-        raise ValueError(f"Invalid .whl filename format: {whl_name}")
+        print(f"Error: Invalid .whl filename format: {whl_filename}")
+        return
 
-    pkg_name = canonicalize_name(parts[0])  # Normalize name (e.g., PyYAML -> pyyaml)
+    pkg_name = parts[0]
     version = parts[1]
-    return pkg_name, version
 
-def create_package_structure(whl_path, repo_root):
-    """Creates the folder structure and copies the .whl file."""
-    pkg_name, version = extract_metadata(whl_path)
-    pkg_folder = repo_root / "files" / pkg_name / version
-    pkg_folder.mkdir(parents=True, exist_ok=True)
+    pkg_version_dir = os.path.join(root_dir, pkg_name, version)
+    os.makedirs(pkg_version_dir, exist_ok=True)
 
-    # Copy .whl file
-    dest_whl_path = pkg_folder / Path(whl_path).name
-    shutil.copy2(whl_path, dest_whl_path)
+    dest_whl_path = os.path.join(pkg_version_dir, whl_filename)
+    shutil.copy2(whl_file, dest_whl_path)
 
-    # Update HTML index
-    update_package_index(pkg_name, repo_root)
+    update_root_index(pkg_name, root_dir)
+    update_package_index(pkg_name, version, dest_whl_path, root_dir, base_url)
+    print(f"Successfully processed {whl_file} and updated index files.")
 
-def update_package_index(pkg_name, repo_root):
-    """Updates or creates the package index file."""
-    pkg_folder = repo_root / "files" / pkg_name
-    html_path = repo_root / f"{pkg_name}.html"
 
-    links = []
-    for version_folder in sorted(pkg_folder.iterdir(), key=lambda p: parse(p.name)):
-        for whl_file in version_folder.glob("*.whl"):
-            rel_path = os.path.relpath(whl_file, repo_root)
-            links.append(f'<a href="{rel_path}" rel="internal">{whl_file.name}</a>')
+def main():
+    parser = argparse.ArgumentParser(
+        description="Process a .whl file and update the directory structure and index.html files.")
+    parser.add_argument("--whl_file", help="Path to the .whl file")
+    parser.add_argument("--root_dir", default=".", help="Root directory for storing package files")
+    parser.add_argument("--base_url", help="Base URL for the package repository")
 
-    html_content = (
-            "<!DOCTYPE html>\n"
-            "<html>\n"
-            "    <head>\n"
-            "        <title>Simple Index</title>\n"
-            "        <meta name=\"api-version\" value=\"2\"/>\n"
-            "    </head>\n"
-            "    <body>\n"
-            "        " + "\n        ".join(links) + "\n"
-                                                    "    </body>\n"
-                                                    "</html>\n"
-    )
+    args = parser.parse_args()
+    process_whl_file(args.whl_file, args.root_dir, args.base_url)
 
-    with open(html_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python update_pypi_repo.py <path_to_whl>")
-        sys.exit(1)
-
-    whl_path = Path(sys.argv[1])
-    if not whl_path.exists() or not whl_path.suffix == ".whl":
-        print(f"Invalid .whl file: {whl_path}")
-        sys.exit(1)
-
-    create_package_structure(whl_path, REPO_ROOT)
-    print(f"Package {whl_path.name} added to the repository.")
+    main()
