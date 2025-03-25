@@ -3,6 +3,7 @@ import shutil
 import sys
 import hashlib
 import argparse
+import zipfile
 from urllib.parse import quote
 
 
@@ -13,6 +14,22 @@ def calculate_sha256(file_path):
         while chunk := f.read(8192):
             sha256.update(chunk)
     return sha256.hexdigest()
+
+
+def extract_requires_python(whl_file):
+    """Extract the Python requirement from the wheel file metadata."""
+    try:
+        with zipfile.ZipFile(whl_file, 'r') as z:
+            for name in z.namelist():
+                if name.endswith(".dist-info/METADATA"):
+                    with z.open(name) as meta_file:
+                        for line in meta_file:
+                            decoded_line = line.decode("utf-8").strip()
+                            if decoded_line.startswith("Requires-Python:"):
+                                return decoded_line.split(":", 1)[1].strip()
+    except Exception as e:
+        print(f"Warning: Could not extract 'Requires-Python' from {whl_file}: {e}")
+    return None
 
 
 def update_root_index(pkg_name, root_dir):
@@ -39,18 +56,43 @@ def update_package_index(pkg_name, version, whl_file, root_dir, base_url):
     sha256_hash = calculate_sha256(whl_file)
     whl_filename = os.path.basename(whl_file)
     whl_url = f"{base_url}/{pkg_name}/{version}/{quote(whl_filename)}#sha256={sha256_hash}"
-    link_entry = f'        <a href="{whl_url}" data-requires-python="&gt;=3.8, &lt;3.13" rel="internal">{whl_filename}</a>'
+    requires_python = extract_requires_python(whl_file)
+    requires_python_attr = f' data-requires-python="{requires_python.replace("<", "&lt;").replace(">", "&gt;")}"' if requires_python else ""
+    link_entry = f'        <a href="{whl_url}"{requires_python_attr} rel="internal">{whl_filename}</a>'
 
     if os.path.exists(index_file):
         with open(index_file, "r", encoding="utf-8") as f:
-            content = f.read()
-        if link_entry not in content:
-            content = content.replace("</body>", f"{link_entry}\n    </body>")
+            content = f.readlines()
+
+        # Ensure all links remain within the <body> tag
+        cleaned_content = []
+        inside_body = False
+        for line in content:
+            stripped_line = line.strip()
+            if stripped_line == "<body>":
+                inside_body = True
+            cleaned_content.append(line.rstrip())
+            if stripped_line == "</body>" and inside_body:
+                cleaned_content.insert(-1, link_entry)  # Insert before </body>
+                inside_body = False
+
+        content = cleaned_content
     else:
-        content = f'<!DOCTYPE html>\n<html>\n    <head>\n        <title>Simple Index</title>\n        <meta name="api-version" value="2"/>\n    </head>\n    <body>\n{link_entry}\n    </body>\n</html>'
+        content = [
+            '<!DOCTYPE html>',
+            '<html>',
+            '    <head>',
+            '        <title>Simple Index</title>',
+            '        <meta name="api-version" value="2"/>',
+            '    </head>',
+            '    <body>',
+            f'{link_entry}',
+            '    </body>',
+            '</html>'
+        ]
 
     with open(index_file, "w", encoding="utf-8") as f:
-        f.write(content)
+        f.write("\n".join(content))
 
 
 def process_whl_file(whl_file, root_dir, base_url):
